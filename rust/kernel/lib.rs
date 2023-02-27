@@ -101,6 +101,9 @@ pub mod user_ptr;
 #[cfg(CONFIG_KUNIT)]
 pub mod kunit;
 
+#[cfg(CONFIG_REGMAP)]
+pub mod regmap;
+
 #[doc(hidden)]
 pub use build_error::build_error;
 
