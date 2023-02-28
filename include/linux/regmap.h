@@ -457,7 +457,7 @@ struct regmap_config {
  *
  * Registers, mapped to this virtual range, are accessed in two steps:
  *     1. page selector register update;
- *     2. access through data window registers.
+ *     2. access through data windowregisters.
  */
 struct regmap_range_cfg {
 	const char *name;
