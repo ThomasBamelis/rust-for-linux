@@ -17,14 +17,15 @@
     TODO: much later, implement dev managened one and allow for configs which require dev argument
  */
 
-use crate::c_str;
 use crate::bindings;
-use crate::error::{code::*, Error, Result, to_result};
-use crate::str::{CStr};
-use crate::sync::Lock;
-use alloc::boxed::Box;
-use core::pin::Pin;
-use core::convert::{From, Into};
+use crate::device::Device;
+use crate::error::{Error, Result, to_result, from_kernel_err_ptr};
+use crate::str::CStr;
+use core::ffi::c_void;
+use core::ptr;
+
+#[cfg(CONFIG_REGMAP_MMIO)]
+use crate::io_mem::IoMem;
 
 pub enum RegcacheType {
     None,
@@ -47,9 +48,9 @@ pub struct RegmapRange {
     range_max: u32
 }
 
-pub struct RegmapAccessTable {
-    yes_ranges: [RegmapRange],
-    no_ranges: [RegmapRange]
+pub struct RegmapAccessTable<'a> {
+    yes_ranges: &'a[RegmapRange],
+    no_ranges: &'a[RegmapRange]
 }
 
 /**
@@ -81,7 +82,7 @@ pub struct RegmapRangeConfig {
 /// Configuration for the register map of a device.
 /// A value of None for an Option<i32> or Option<u32> will
 /// default to 0 unless otherwise specified.
-pub struct RegmapConfig {
+pub struct RegmapConfig<'a> {
     ///  Optional name of the regmap. Useful when a device has multiple
     /// register regions.
     name: Option<&'static CStr>,
@@ -197,20 +198,20 @@ pub struct RegmapConfig {
     max_register: Option<u32>,
     /// Optional, points to a struct regmap_access_table specifying
     /// valid ranges for write access.
-    wr_table: Option<RegmapAccessTable>,
+    wr_table: Option<RegmapAccessTable<'a>>,
     /// As above, for read access.
-    rd_table: Option<RegmapAccessTable>,
+    rd_table: Option<RegmapAccessTable<'a>>,
     /// As above, for volatile registers.
-    volatile_table: Option<RegmapAccessTable>,
+    volatile_table: Option<RegmapAccessTable<'a>>,
     /// As above, for precious registers.
-    precious_table: Option<RegmapAccessTable>,
+    precious_table: Option<RegmapAccessTable<'a>>,
     /// As above, for no increment writeable registers.
-    wr_noinc_table: Option<RegmapAccessTable>,
+    wr_noinc_table: Option<RegmapAccessTable<'a>>,
     /// As above, for no increment readable registers.
-    rd_noinc_table: Option<RegmapAccessTable>,
+    rd_noinc_table: Option<RegmapAccessTable<'a>>,
     /// Power on reset values for registers (for use with
     /// register cache support).
-    reg_defaults: Option<[RegDefault]>,
+    reg_defaults: Option<&'a[RegDefault]>,
     /// The actual cache type.
     cache_type: RegcacheType,
     /// Power on reset values for registers (for use with
@@ -255,7 +256,7 @@ pub struct RegmapConfig {
     /// regmap bus is used.
     val_format_endian: (),
     /// Array of configuration entries for virtual address ranges.
-    ranges: Option<&[RegmapRangeConfig]>,
+    ranges: Option<&'a[RegmapRangeConfig]>,
     /// Indicate if a hardware spinlock should be used.
     use_hwlock: Option<bool>,
     /// Indicate if a raw spinlock should be used.
@@ -269,19 +270,20 @@ pub struct RegmapConfig {
     can_sleep: Option<bool>
 }
 
-impl RegmapConfig {
-    pub fn new(reg_bits: i32, val_bits: i32) -> self {
+impl<'a> RegmapConfig<'a> {
+    pub fn new(reg_bits: i32, val_bits: i32) -> Self {
         todo!()
     }
 }
 
-impl core::default::Default for RegmapConfig {
+impl<'a> core::default::Default for RegmapConfig<'a> {
     fn default() -> Self {
         RegmapConfig::new(8, 8)
     }
 }
 
-impl Into<bindings::regmap_config> for RegmapConfig {
+/*
+impl<'a> Into<bindings::regmap_config> for RegmapConfig<'a> {
     fn into(self) -> bindings::regmap_config {
         bindings::regmap_config {
             name: (),
@@ -341,42 +343,61 @@ impl Into<bindings::regmap_config> for RegmapConfig {
         }
     }
 }
+*/
 
 
 /// Wrapper struct around the kernel's `spi_device`.
-pub struct Regmap(*mut bindings::regmap);
+pub struct Regmap<T> {
+    ptr: *mut bindings::regmap,
+    /// Holds the bus so that it does not get dropped until the regmap gets dropped.
+    bus: T
+}
 
-impl Regmap {
-
-    /// Precondition: ptr is a valid pointer to a regmap struct and never
-    /// again after.
-    pub unsafe fn from_ptr(ptr: *mut bindings::regmap) -> Self {
-        Self(ptr)
+#[cfg(CONFIG_REGMAP_MMIO)]
+impl<const SIZE: usize> Regmap<IoMem<SIZE>> {
+    ///
+    /// TODO: does this do iounmap automatically?
+    pub fn from_mmio(dev: &mut Device, mmio: IoMem<SIZE>, config: &RegmapConfig<'_>) -> Result<Self> {
+        let ptr =
+            from_kernel_err_ptr(
+                // Safety: device and IOmem are legal
+                unsafe{
+                    // TODO unsupported for CONFIG_LOCKDEP
+                    bindings::__regmap_init_mmio_clk(dev.ptr, ptr::null(), mmio.ptr as *mut c_void, config, ptr::null_mut(), ptr::null())
+                }
+            )?;
+        
+        Ok(Self {
+            ptr,
+            bus: mmio
+        })
     }
+}
 
-    /// Returns the raw pointer.
-    /// Not pub so the pointer never gets handed of again.
-    unsafe fn to_ptr(&mut self) -> *mut bindings::regmap {
-        self.0
-    }
+impl<T> Regmap<T> {
+
 
     // mut because reading from addresses can have side effects (resetting flags)
     pub fn regmap_read(&mut self, reg: u32) -> Result<u32> {
         let mut val: u32 = 0;
         // Safety:
-        match unsafe {bindings::regmap_read(self.to_ptr(), reg, &mut val)} {
+        match unsafe {bindings::regmap_read(self.ptr, reg, &mut val)} {
             0 => Ok(val),
             e => Err(Error::from_kernel_errno(e))
         }
     }
 
     pub fn regmap_write(&mut self, reg: u32, val: u32) -> Result<()> {
-        to_result(unsafe {bindings::regmap_write(self.to_ptr(), reg, val)})
+        to_result(unsafe {bindings::regmap_write(self.ptr, reg, val)})
     }
+}
 
-    /// Safety: by consuming the Regmap, the pointer shall not be used again
+impl<T> Drop for Regmap<T> {
+    /// Safety: drop can only be called so it takes ownership (core::mem::drop).
+    /// By consuming the Regmap, the pointer shall not be used again
     /// under the from_ptr preconditions.
-    fn regmap_exit(self) {
-        unsafe {bindings::regmap_exit(self.0)}
+    fn drop(&mut self) {
+        unsafe {bindings::regmap_exit(self.ptr)}
+        core::mem::drop(self.bus)
     }
 }

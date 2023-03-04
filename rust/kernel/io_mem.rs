@@ -58,7 +58,7 @@ impl Resource {
 /// }
 /// ```
 pub struct IoMem<const SIZE: usize> {
-    ptr: usize,
+    pub(crate) ptr: usize,
 }
 
 macro_rules! define_read {
