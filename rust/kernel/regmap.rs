@@ -363,6 +363,8 @@ impl<const SIZE: usize> Regmap<IoMem<SIZE>> {
                 // Safety: device and IOmem are legal
                 unsafe{
                     // TODO unsupported for CONFIG_LOCKDEP
+                    let config = ptr::null();
+                    todo!();
                     bindings::__regmap_init_mmio_clk(dev.ptr, ptr::null(), mmio.ptr as *mut c_void, config, ptr::null_mut(), ptr::null())
                 }
             )?;
@@ -398,6 +400,6 @@ impl<T> Drop for Regmap<T> {
     /// under the from_ptr preconditions.
     fn drop(&mut self) {
         unsafe {bindings::regmap_exit(self.ptr)}
-        core::mem::drop(self.bus)
+        //core::mem::drop(self.bus)
     }
 }
