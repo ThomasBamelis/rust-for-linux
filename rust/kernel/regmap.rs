@@ -378,6 +378,7 @@ impl<const SIZE: usize> Regmap<IoMem<SIZE>> {
 
 impl<T> Regmap<T> {
 
+    // TODO there is a trait already for from_ptr, use it if necessary
 
     // mut because reading from addresses can have side effects (resetting flags)
     pub fn regmap_read(&mut self, reg: u32) -> Result<u32> {
