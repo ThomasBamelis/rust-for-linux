@@ -21,36 +21,75 @@ use crate::bindings;
 use crate::device::Device;
 use crate::error::{Error, Result, to_result, from_kernel_err_ptr};
 use crate::str::CStr;
+use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr;
 
 #[cfg(CONFIG_REGMAP_MMIO)]
 use crate::io_mem::IoMem;
 
+#[derive(Copy, Clone)]
+pub enum RegmapEndian {
+	RegmapEndianDefault = 0,
+	RegmapEndianBig,
+	RegmapEndianLittle,
+	RegmapEndianNative,
+}
+
+impl From<RegmapEndian> for u32 {
+    fn from(value: RegmapEndian) -> Self {
+        value as u32
+    }
+}
+
+#[derive(Copy, Clone)]
 pub enum RegcacheType {
-    None,
+    None = 0,
     RBTREE,
     COMPRESSED,
     FLAT
 }
 
-/// Default value for a register.
-pub struct RegDefault {
-    /// Register address.
-    reg: u32,
-    /// Register default value.
-    def: u32
+impl From<RegcacheType> for u32 {
+    fn from(value: RegcacheType) -> Self {
+        value as u32
+    }
 }
 
-#[repr(C)]
-pub struct RegmapRange {
-    range_min: u32,
-    range_max: u32
-}
+/// Default value for a register.
+type RegDefault = bindings::reg_default;
+// // Safety: must have same memory layout as reg_default
+// #[repr(C)]
+// pub struct RegDefault {
+//     /// Register address.
+//     reg: u32,
+//     /// Register default value.
+//     def: u32
+// }
+
+type RegmapRange = bindings::regmap_range;
+// // Safety: must have same memory layout as regmap_range
+// #[repr(C)]
+// pub struct RegmapRange {
+//     range_min: u32,
+//     range_max: u32
+// }
 
 pub struct RegmapAccessTable<'a> {
     yes_ranges: &'a[RegmapRange],
     no_ranges: &'a[RegmapRange]
+}
+
+
+impl<'a> RegmapAccessTable<'a> {
+    unsafe fn to_binding(&self) -> bindings::regmap_access_table {
+        bindings::regmap_access_table {
+            yes_ranges: self.yes_ranges.as_ptr(),
+            n_yes_ranges: self.yes_ranges.len() as u32,
+            no_ranges: self.no_ranges.as_ptr(),
+            n_no_ranges: self.no_ranges.len() as u32,
+        }
+    }
 }
 
 /**
@@ -79,9 +118,39 @@ pub struct RegmapRangeConfig {
 	window_len: u32,
 }
 
+impl RegmapRangeConfig {
+    /// Converts to binding.
+    /// Necessary to wrap const char into CStr.
+    /// Safety: self.name must exist as long as the return value
+    unsafe fn to_binding(&self) -> bindings::regmap_range_cfg {
+        bindings::regmap_range_cfg {
+            name: self.name.as_char_ptr(),
+            range_min: self.range_min,
+            range_max: self.range_max,
+            selector_reg: self.selector_reg,
+            selector_mask: self.selector_mask,
+            selector_shift: self.selector_shift,
+            window_start: self.window_start,
+            window_len: self.window_len,
+        }
+    }
+}
+
+/// Holds the binding equivalents of the Rust structs in RegmapConfig
+struct RegmapConfigBindings {
+    wr_table: Option<bindings::regmap_access_table>,
+    rd_table: Option<bindings::regmap_access_table>,
+    volatile_table: Option<bindings::regmap_access_table>,
+    precious_table: Option<bindings::regmap_access_table>,
+    wr_noinc_table: Option<bindings::regmap_access_table>,
+    rd_noinc_table: Option<bindings::regmap_access_table>,
+    ranges: Option<Vec<bindings::regmap_range_cfg>>,
+}
+
 /// Configuration for the register map of a device.
 /// A value of None for an Option<i32> or Option<u32> will
 /// default to 0 unless otherwise specified.
+/// Missing options are as of yet unsupported.
 pub struct RegmapConfig<'a> {
     ///  Optional name of the regmap. Useful when a device has multiple
     /// register regions.
@@ -144,12 +213,10 @@ pub struct RegmapConfig<'a> {
     /// readable if it belongs to one of the ranges specified
     /// by rd_noinc_table).
     readable_noinc_reg: None,
-    */
     /// This regmap is either protected by external means or
     /// is guaranteed not to be accessed from multiple threads.
     /// Don't use any locking mechanisms.
     disable_locking: bool,
-    /*
     /// Optional lock callback (overrides regmap's default lock
     /// function, based on spinlock or mutex).
     lock: (),
@@ -214,19 +281,21 @@ pub struct RegmapConfig<'a> {
     reg_defaults: Option<&'a[RegDefault]>,
     /// The actual cache type.
     cache_type: RegcacheType,
+    /*
     /// Power on reset values for registers (for use with
     /// register cache support).
     reg_defaults_raw: (),
     /// Number of elements in reg_defaults_raw.
     num_reg_defaults_raw: (),
+    */
     /// Mask to be set in the top bytes of the register when doing
     /// a read.
-    read_flag_mask: Option<u32>,
+    read_flag_mask: Option<u64>,
     /// Mask to be set in the top bytes of the register when doing
     /// a write. If both read_flag_mask and write_flag_mask are
     /// empty and zero_flag_mask is not set the regmap_bus default
     /// masks are used.
-    write_flag_mask: Option<u32>,
+    write_flag_mask: Option<u64>,
     /// If set, read_flag_mask and write_flag_mask are used even
     /// if they are both empty.
     zero_flag_mask: Option<bool>,
@@ -250,13 +319,14 @@ pub struct RegmapConfig<'a> {
     /// Endianness for formatted register addresses. If this is
     /// DEFAULT, the @reg_format_endian_default value from the
     /// regmap bus is used.
-    reg_format_endian: (),
+    reg_format_endian: RegmapEndian,
     /// Endianness for formatted register values. If this is
     /// DEFAULT, the @reg_format_endian_default value from the
     /// regmap bus is used.
-    val_format_endian: (),
+    val_format_endian: RegmapEndian,
     /// Array of configuration entries for virtual address ranges.
     ranges: Option<&'a[RegmapRangeConfig]>,
+    /* TODO unsure about safety
     /// Indicate if a hardware spinlock should be used.
     use_hwlock: Option<bool>,
     /// Indicate if a raw spinlock should be used.
@@ -266,87 +336,134 @@ pub struct RegmapConfig<'a> {
     /// The hardware spinlock mode, should be HWLOCK_IRQSTATE,
     /// HWLOCK_IRQ or 0.
     hwlock_mode: Option<u32>,
+    */
     /// Optional, specifies whether regmap operations can sleep.
     can_sleep: Option<bool>
 }
 
 impl<'a> RegmapConfig<'a> {
     pub fn new(reg_bits: i32, val_bits: i32) -> Self {
-        todo!()
+        RegmapConfig {
+            name: None,
+            reg_bits,
+            reg_stride: None,
+            reg_downshift: None,
+            reg_base: None,
+            pad_bits: None,
+            val_bits,
+            max_raw_read: None,
+            max_raw_write: None,
+            fast_io: None,
+            io_port: None,
+            max_register: None,
+            wr_table: None,
+            rd_table: None,
+            volatile_table: None,
+            precious_table: None,
+            wr_noinc_table: None,
+            rd_noinc_table: None,
+            reg_defaults: None,
+            cache_type: RegcacheType::None,
+            read_flag_mask: None,
+            write_flag_mask: None,
+            zero_flag_mask: None,
+            use_single_read: None,
+            use_single_write: None,
+            use_relaxed_mmio: None,
+            can_multi_write: None,
+            reg_format_endian: RegmapEndian::RegmapEndianDefault,
+            val_format_endian: RegmapEndian::RegmapEndianDefault,
+            ranges: None,
+            can_sleep: None,
+        }
     }
-}
 
-impl<'a> core::default::Default for RegmapConfig<'a> {
-    fn default() -> Self {
-        RegmapConfig::new(8, 8)
-    }
-}
-
-/*
-impl<'a> Into<bindings::regmap_config> for RegmapConfig<'a> {
-    fn into(self) -> bindings::regmap_config {
-        bindings::regmap_config {
-            name: (),
-            reg_bits: (),
-            reg_stride: (),
-            reg_downshift: (),
-            reg_base: (),
-            pad_bits: (),
-            val_bits: (),
-            writeable_reg: None,
-            readable_reg: None,
-            volatile_reg: None,
-            precious_reg: None,
-            writeable_noinc_reg: None,
-            readable_noinc_reg: None,
-            disable_locking: (),
-            lock: (),
-            unlock: (),
-            lock_arg: (),
-            reg_read: (),
-            reg_write: (),
-            reg_update_bits: (),
-            read: (),
-            write: (),
-            max_raw_read: (),
-            max_raw_write: (),
-            fast_io: (),
-            io_port: (),
-            max_register: (),
-            wr_table: (),
-            rd_table: (),
-            volatile_table: (),
-            precious_table: (),
-            wr_noinc_table: (),
-            rd_noinc_table: (),
-            reg_defaults: (),
-            num_reg_defaults: (),
-            cache_type: (),
-            reg_defaults_raw: (),
-            num_reg_defaults_raw: (),
-            read_flag_mask: (),
-            write_flag_mask: (),
-            zero_flag_mask: (),
-            use_single_read: (),
-            use_single_write: (),
-            use_relaxed_mmio: (),
-            can_multi_write: (),
-            reg_format_endian: (),
-            val_format_endian: (),
-            ranges: (),
-            num_ranges: (),
-            use_hwlock: (),
-            use_raw_spinlock: (),
-            hwlock_id: (),
-            hwlock_mode: (),
-            can_sleep: ()
+    ///
+    /// Transform to regmap_config binding.
+    /// None values inidicate fields that are yet unsupported.
+    unsafe fn to_binding(&self) -> Result<(bindings::regmap_config, RegmapConfigBindings)> {
+        unsafe {
+            let binds = RegmapConfigBindings {
+                wr_table: self.wr_table.as_ref().map(|r| r.to_binding()),
+                rd_table: self.rd_table.as_ref().map(|r| r.to_binding()),
+                volatile_table: self.volatile_table.as_ref().map(|r| r.to_binding()),
+                precious_table: self.precious_table.as_ref().map(|r| r.to_binding()),
+                wr_noinc_table: self.wr_noinc_table.as_ref().map(|r| r.to_binding()),
+                rd_noinc_table: self.rd_noinc_table.as_ref().map(|r| r.to_binding()),
+                ranges: if let Some(r) = self.ranges {
+                        let mut v = Vec::try_with_capacity(r.len())?;
+                        for i in r {
+                            v.try_push(i.to_binding())?
+                        }
+                        Some(v)
+                    }
+                    else {
+                        None
+                    }
+            };
+            let cfg = bindings::regmap_config {
+                name: if let Some(n) = self.name {n.as_char_ptr()} else {ptr::null()},
+                reg_bits: self.reg_bits,
+                reg_stride: self.reg_stride.unwrap_or(0),
+                reg_downshift: self.reg_downshift.unwrap_or(0),
+                reg_base: self.reg_base.unwrap_or(0),
+                pad_bits: self.pad_bits.unwrap_or(0),
+                val_bits: self.val_bits,
+                writeable_reg: None,
+                readable_reg: None,
+                volatile_reg: None,
+                precious_reg: None,
+                writeable_noinc_reg: None,
+                readable_noinc_reg: None,
+                disable_locking: false,
+                lock: None,
+                unlock: None,
+                lock_arg: ptr::null_mut(),
+                reg_read: None,
+                reg_write: None,
+                reg_update_bits: None,
+                read: None,
+                write: None,
+                max_raw_read: self.max_raw_read.unwrap_or(0),
+                max_raw_write: self.max_raw_write.unwrap_or(0),
+                fast_io: self.fast_io.unwrap_or(false),
+                io_port: self.io_port.unwrap_or(false),
+                max_register: self.max_register.unwrap_or(0),
+                wr_table: if let Some(x) = binds.wr_table.as_ref() {x} else {ptr::null()},
+                rd_table: if let Some(x) = binds.rd_table.as_ref() {x} else {ptr::null()},
+                volatile_table: if let Some(x) = binds.volatile_table.as_ref() {x} else {ptr::null()},
+                precious_table: if let Some(x) = binds.precious_table.as_ref() {x} else {ptr::null()},
+                wr_noinc_table: if let Some(x) = binds.wr_noinc_table.as_ref() {x} else {ptr::null()},
+                rd_noinc_table: if let Some(x) = binds.rd_noinc_table.as_ref() {x} else {ptr::null()},
+                reg_defaults: if let Some(x) = self.reg_defaults.as_ref() {x.as_ptr()} else {ptr::null()},
+                num_reg_defaults: if let Some(x) = self.reg_defaults.as_ref() {x.len() as u32} else {0},
+                cache_type: self.cache_type.into(), 
+                reg_defaults_raw: ptr::null(),
+                num_reg_defaults_raw: 0,
+                read_flag_mask: self.read_flag_mask.unwrap_or(0),
+                write_flag_mask: self.write_flag_mask.unwrap_or(0),
+                zero_flag_mask: self.zero_flag_mask.unwrap_or(false),
+                use_single_read: self.use_single_read.unwrap_or(false),
+                use_single_write: self.use_single_write.unwrap_or(false),
+                use_relaxed_mmio: self.use_relaxed_mmio.unwrap_or(false), // TODO unsafe?
+                can_multi_write: self.can_multi_write.unwrap_or(false),
+                reg_format_endian: self.reg_format_endian.into(),
+                val_format_endian: self.val_format_endian.into(),
+                ranges: if let Some(x) = binds.ranges.as_ref() {x.as_ptr()} else {ptr::null()},
+                num_ranges: if let Some(x) = self.ranges.as_ref() {x.len() as u32} else {0},
+                use_hwlock: false,
+                use_raw_spinlock: false, // TODO unsafe?
+                hwlock_id: 0,
+                hwlock_mode: 0,
+                can_sleep: self.can_sleep.unwrap_or(false)
+            };
+            Ok((cfg, binds))
         }
     }
 }
-*/
 
 
-/// Wrapper struct around the kernel's `spi_device`.
+/// Holds a Regmap device
 pub struct Regmap<T> {
     ptr: *mut bindings::regmap,
     /// Holds the bus so that it does not get dropped until the regmap gets dropped.
@@ -361,11 +478,12 @@ impl<const SIZE: usize> Regmap<IoMem<SIZE>> {
         let ptr =
             from_kernel_err_ptr(
                 // Safety: device and IOmem are legal
+                // Safety: for the currently supported options for the config, no field of the
+                // config has to exist after the regmap has been initialised
                 unsafe{
                     // TODO unsupported for CONFIG_LOCKDEP
-                    let config = ptr::null();
-                    todo!();
-                    bindings::__regmap_init_mmio_clk(dev.ptr, ptr::null(), mmio.ptr as *mut c_void, config, ptr::null_mut(), ptr::null())
+                    let (config, internal_bindings) = config.to_binding()?;
+                    bindings::__regmap_init_mmio_clk(dev.ptr, ptr::null(), mmio.ptr as *mut c_void, &config, ptr::null_mut(), ptr::null())
                 }
             )?;
         
